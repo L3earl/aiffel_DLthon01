@@ -1,0 +1,6 @@
+/earl_tmp/*
+.vscode/*
+/wandb/*
+.venv/*
+.venv_tensor/*
+/results/*

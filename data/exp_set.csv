@@ -1,0 +1,3 @@
+preprocessing,test_size,model_name,learning_rate,epochs,batch_size
+preprocess_sentence,0.2,klue/bert-base,5.00E-05,3,8
+preprocess_sentence,0.2,klue/roberta-base,5.00E-05,3,8
