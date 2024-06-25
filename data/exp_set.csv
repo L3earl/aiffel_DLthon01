@@ -1,3 +1,9 @@
+<<<<<<< HEAD
 pre01,pre02,pre03,test_size,model_name,learning_rate,epochs,batch_size
 remove_stopwords,,,0.2,klue/bert-base,5.00E-05,3,8
 ,,,0.2,klue/bert-base,5.00E-05,3,8
+=======
+preprocessing,test_size,model_name,learning_rate,epochs,batch_size
+preprocess_sentence,0.2,klue/bert-base,5.00E-05,3,8
+preprocess_sentence,0.2,klue/roberta-base,5.00E-05,3,8
+>>>>>>> f472f0f94d2d071cde84b5002e078996d879cb5b
