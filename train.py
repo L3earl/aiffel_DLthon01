@@ -16,6 +16,7 @@ from torch.optim import AdamW
 import logging
 import warnings
 from konlpy.tag import Okt
+from soynlp.normalizer import repeat_normalize
 
 #%% 전역 변수 
 # W&B 로그인
@@ -34,14 +35,17 @@ today_date = datetime.now().strftime('%m%d')
 
 #%% 함수 정의 - 코드 완성되면 다른 폴더로 옮기고 import 하는 방식으로 변경
 
-# 전처리 함수
-def preprocess_sentence(sentence):
-    sentence = sentence.lower().strip()
-    sentence = re.sub(r"([?.!,])", r" \1 ", sentence)
-    sentence = re.sub(r'[" "]+', " ", sentence)
-    sentence = re.sub(r"[^1-9a-zA-Z가-힣?.!,]+", " ", sentence)
-    sentence = sentence.strip()
-    return sentence
+# 기본 전처리 함수
+def clean(x):
+    # emojis = ''.join(emoji.UNICODE_EMOJI.keys())
+    pattern = re.compile(f'[^ .,?!/@$%~％·∼()\x00-\x7Fㄱ-힣]+')
+    url_pattern = re.compile(
+        r'https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)')
+    x = pattern.sub(' ', x)
+    x = url_pattern.sub('', x)
+    x = x.strip()
+    x = repeat_normalize(x, num_repeats=2)
+    return x
 
 # 모델 학습에 필요한 데이터 셋으로 만들어주는 클래스
 class CustomDataset(Dataset):
@@ -95,19 +99,6 @@ def remove_stopwords(texts, stopwords, okt):
         result.append(' '.join(filtered_tokens))
     return result
 
-# 예시 텍스트 리스트
-# texts = [
-#    "예시 문장을 작성해 봅니다. 이것은 토크나이징 테스트입니다.",
-#    "또 다른 예시 문장입니다. 불용어를 잘 제거해보세요."
-# ]
-
-# # 불용어 제거 함수 호출
-# # processed_tr_texts = remove_stopwords(train_texts, stopwords, okt)
-# # processed_val_texts = remove_stopwords(val_texts, stopwords, okt)
-
-# print("Original texts:", train_texts[0])
-# print("Processed texts:", processed_tr_texts[0])
-
 #%% 데이터 불러오기
 # train셋
 train_data_path = "./data/train.csv"
@@ -129,12 +120,21 @@ harassment_others = train_data[train_data['class'] == '기타 괴롭힘 대화']
 concat_tr_df = pd.concat([intimidation, extortion, harassment_workplace, harassment_others], axis=0, ignore_index=True)
 concat_tr_df['encoded_label'] = concat_tr_df['class'].map(label_encode)
 
+# test 셋
+with open('./data/test.json') as f:
+    test_data = json.load(f)
+
+test_data = pd.DataFrame(test_data).T
+test_data.reset_index(drop=True, inplace=True)
+
 # 실험 셋 로드
 exp_set = pd.read_csv('./data/exp_set.csv')
 
 #%% 모델 학습
 train_texts = concat_tr_df['conversation'].to_list()
 train_labels = concat_tr_df['encoded_label'].to_list()
+
+tmpDf = pd.DataFrame()
 
 for idx, row in exp_set.iterrows():
     # 실험 셋에서 하이퍼파라미터 및 전처리 함수 로드
@@ -167,11 +167,13 @@ for idx, row in exp_set.iterrows():
     # wandb에 기록될 실험 이름 
     exp_name = f"{today_date}_{model_name}"
     
-    # 전처리 목록에 preprocess_sentence 함수가 있으면 적용
-    preprocess_func = next((func for func in pre if func is not None and func.__name__ == 'preprocess_sentence'), None)
+    # 전처리 목록에 clean 함수가 있으면 적용
+    preprocess_func = next((func for func in pre if func is not None and func.__name__ == 'clean'), None)
     if preprocess_func:
         print('전처리 함수 적용')
-        train_texts = [preprocess_func(sentence) for sentence in train_texts]
+        # train_texts = [preprocess_func(sentence) for sentence in train_texts]
+        train_texts = list(map(clean, train_texts))
+        test_texts = list(map(clean, test_data))
         
     # 전처리 목록에 remove_stopwords 함수가 있으면 적용
     preprocess_func = next((func for func in pre if func is not None and func.__name__ == 'remove_stopwords'), None)
@@ -179,6 +181,7 @@ for idx, row in exp_set.iterrows():
         print('불용어 제거')
         # train_texts = [preprocess_func(sentence, stopwords, okt) for sentence in train_texts]
         train_texts = preprocess_func(train_texts, stopwords, okt)
+        test_texts = preprocess_func(test_data, stopwords, okt)
         
     # 데이터 분할
     train_texts, val_texts, train_labels, val_labels = train_test_split(
@@ -220,6 +223,8 @@ for idx, row in exp_set.iterrows():
     for epoch in range(epochs):
         model.train()
         train_loss = 0
+        train_accuracy = 0
+        train_metric = load_metric("accuracy", trust_remote_code=True)
         for batch in train_dataloader:
             batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(**batch)
@@ -231,14 +236,21 @@ for idx, row in exp_set.iterrows():
             optimizer.zero_grad()
             
             train_loss += loss.item()
+            
+            logits = outputs.logits
+            predictions = torch.argmax(logits, dim=-1)
+            train_metric.add_batch(predictions=predictions, references=batch["labels"])
         
         train_loss = train_loss / len(train_dataloader)
+        train_accuracy = train_metric.compute()["accuracy"]
 
         # 검증 루프
         model.eval()
         val_loss = 0
         val_steps = 0
-        metric = load_metric("f1", trust_remote_code=True)
+        # metric = load_metric("f1", trust_remote_code=True)
+        val_metric = load_metric("accuracy", trust_remote_code=True)
+        f1_metric = load_metric("f1", trust_remote_code=True)
         for batch in val_dataloader:
             batch = {k: v.to(device) for k, v in batch.items()}
             with torch.no_grad():
@@ -249,22 +261,47 @@ for idx, row in exp_set.iterrows():
 
             logits = outputs.logits
             predictions = torch.argmax(logits, dim=-1)
-            metric.add_batch(predictions=predictions, references=batch["labels"])
+            val_metric.add_batch(predictions=predictions, references=batch["labels"])
+            f1_metric.add_batch(predictions=predictions, references=batch["labels"])
 
         val_loss = val_loss / val_steps
-        final_score = metric.compute(average='weighted')
+        val_accuracy = val_metric.compute()["accuracy"]
+        final_score = f1_metric.compute(average='weighted')
 
         # 로그 기록
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": train_loss,
+            "train_accuracy": train_accuracy,
             "val_loss": val_loss,
+            "val_accuracy": val_accuracy,
             "val_f1_score": final_score["f1"]
         })
+    
+    # 실험 결과를 DataFrame으로 변환하여 저장
+    tmp = exp_set.iloc[idx]
+    results = {
+        "epoch": epoch + 1,
+        "train_loss": train_loss,
+        "train_accuracy": train_accuracy,
+        "val_loss": val_loss,
+        "val_accuracy": val_accuracy,
+        "val_f1_score": final_score["f1"]
+    }
+    for col, value in results.items():
+        tmp[col] = value
+    tmp2 = pd.DataFrame([tmp])
+    tmpDf = pd.concat([tmpDf, tmp2], ignore_index=True)
 
     # wandb 종료
     wandb.finish()
+
+# DataFrame을 CSV 파일로 저장
+tmpDf.to_csv('./data/results.csv', index=False)
+
 #%% 모델 저장
+
+
 
 
 #%% 모델 평가
