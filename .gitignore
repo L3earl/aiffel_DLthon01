@@ -4,3 +4,6 @@
 .venv/*
 .venv_tensor/*
 /results/*
+/test_pred_clss/*
+/test_pred_logit/*
+/torch_models/*
