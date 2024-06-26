@@ -1,4 +1,8 @@
-#%% 함수 정의 - 코드 완성되면 다른 폴더로 옮기고 import 하는 방식으로 변경
+from konlpy.tag import Okt
+from soynlp.normalizer import repeat_normalize
+import re
+
+#%% 함수 정의 
 
 # 기본 전처리 함수
 def clean(x):
@@ -18,20 +22,6 @@ def clean(x):
     x = repeat_normalize(x, num_repeats=2)
     
     return x
-
-# 모델 학습에 필요한 데이터 셋으로 만들어주는 클래스
-class CustomDataset(Dataset):
-    def __init__(self, encodings, labels):
-        self.encodings = encodings
-        self.labels = labels
-
-    def __getitem__(self, idx):
-        item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
-        item['labels'] = torch.tensor(self.labels[idx])
-        return item
-
-    def __len__(self):
-        return len(self.labels)
 
 # 한국어 불용어 리스트
 stopwords = set([
