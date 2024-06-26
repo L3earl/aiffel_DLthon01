@@ -6,7 +6,7 @@ import json
 import re
 import torch
 from sklearn.model_selection import train_test_split
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, get_scheduler
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, get_scheduler, BertTokenizerFast, BertModel
 from torch.utils.data import DataLoader, Dataset
 import wandb
 # from tqdm.auto import tqdm
@@ -32,20 +32,27 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # 오늘 날짜- log 저장 시 사용
-today_date = datetime.now().strftime('%m%d')
+today_date = datetime.now().strftime('%m%d%H')
 
 #%% 함수 정의 - 코드 완성되면 다른 폴더로 옮기고 import 하는 방식으로 변경
 
 # 기본 전처리 함수
 def clean(x):
-    # emojis = ''.join(emoji.UNICODE_EMOJI.keys())
-    pattern = re.compile(f'[^ .,?!/@$%~％·∼()\x00-\x7Fㄱ-힣]+')
-    url_pattern = re.compile(
-        r'https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)')
+    pattern = re.compile(r'[^ .,?!/@$%~％·∼()\x00-\x7Fㄱ-힣]+')
+    url_pattern = re.compile(r'https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)')
+    
+    # 영어 알파벳 대소문자와 숫자 제거 정규표현식 추가
+    english_pattern = re.compile(r'[a-zA-Z0-9]+')
+    
     x = pattern.sub(' ', x)
     x = url_pattern.sub('', x)
+    
+    # 영어 알파벳 대소문자와 숫자 제거
+    x = english_pattern.sub('', x)
+    
     x = x.strip()
     x = repeat_normalize(x, num_repeats=2)
+    
     return x
 
 # 모델 학습에 필요한 데이터 셋으로 만들어주는 클래스
@@ -78,7 +85,7 @@ stopwords = set([
     '어디', '어떤', '한', '하다', '있다', '되다', '이다', '로', '로서', '로써', 
     '과', '와', '이', '그', '저', '것', '수', '들', '등', '때', '문제', '뿐', 
     '안', '이랑', '랑', '도', '곳', '걸', '에서', '하지만', '그렇지만', '그러나', 
-    '그리고', '따라서', '그러므로', '그러나', '그런데', '때문에', '왜냐하면'
+    '그리고', '따라서', '그러므로', '그러나', '그런데', '때문에', '왜냐하면' , '키키', 'None '
 ])
 
 # KoNLPy Okt 형태소 분석기 로드
@@ -101,6 +108,9 @@ def remove_stopwords(texts, stopwords, okt):
     return result
 
 #%% 데이터 불러오기
+# 실험 셋 로드
+exp_set = pd.read_csv('./data/exp_set.csv')
+
 # train셋
 train_data_path = "./data/train.csv"
 train_data = pd.read_csv(train_data_path)
@@ -110,6 +120,7 @@ label_encode = {
     "갈취 대화": 1,
     "직장 내 괴롭힘 대화": 2,
     "기타 괴롭힘 대화": 3,
+    "일상 대화": 4
 }
 
 intimidation = train_data[train_data['class'] == '협박 대화']
@@ -128,8 +139,22 @@ with open('./data/test.json') as f:
 test_data = pd.DataFrame(test_data).T
 test_data.reset_index(drop=True, inplace=True)
 
-# 실험 셋 로드
-exp_set = pd.read_csv('./data/exp_set.csv')
+# Normal Data 추가
+# nomal_data = pd.read_csv('./data/normal_df.csv') # 카카오톡 대화 데이터
+nomal_data = pd.read_csv('./data/mmc_nomal_data.csv') # 국어국문원 일상 대화 말뭉치 데이터
+
+# 정렬
+add_data_sorted = nomal_data.iloc[nomal_data['conversation'].str.len().sort_values().index]
+
+# 길이가 max_len 이하인 데이터만 추출하여 새로운 데이터 프레임 생성
+max_len = 800
+add_data = add_data_sorted[add_data_sorted['conversation'].str.len() <= max_len]
+
+# test셋의 lable이 균형 잡혀 있다는 것을 고려하여, 일반 데이터를 너무 많이 추가하지 않도록 함
+r_num = exp_set['num_normal'][0]
+nomal_data_tmp = add_data.sample(r_num)
+
+train_data = pd.concat([train_data, nomal_data_tmp])
 
 #%% 모델 학습
 tmpDf = pd.DataFrame()
@@ -149,7 +174,9 @@ for idx, row in exp_set.iterrows():
         else:
             pre[i] = None  # 함수 이름이 없거나 globals에 없는 경우 None 할당
     test_size = row['test_size']
+    num_normal_data = row['num_normal']
     model_name = row['model_name']
+    token_name = row['tokenizer']
     learning_rate = row['learning_rate']
     epochs = row['epochs']
     batch_size = row['batch_size']
@@ -160,7 +187,9 @@ for idx, row in exp_set.iterrows():
         'pre02': pre[1],
         'pre02': pre[2],
         'test_size': test_size,
+        'num_normal_data': num_normal_data,
         'model_name': model_name,
+        'tokenizer': token_name,
         "learning_rate": learning_rate,
         "epochs": epochs,
         "batch_size": batch_size
@@ -187,7 +216,7 @@ for idx, row in exp_set.iterrows():
         stopwords_YN = 'N'
     
     # wandb에 기록될 실험 이름 
-    exp_name = f"{today_date}_{model_name.replace('/', '_').replace('-', '_')}_{clean_YN}_{stopwords_YN}_{epochs}_{batch_size}"
+    exp_name = f"{today_date}_{model_name.replace('/', '_').replace('-', '_')}_{token_name}_{num_normal_data}_{epochs}_{batch_size}_{clean_YN}_{stopwords_YN}"
     
     # 데이터 분할
     train_texts, val_texts, train_labels, val_labels = train_test_split(
@@ -195,7 +224,9 @@ for idx, row in exp_set.iterrows():
     )
 
     # 토크나이저 및 데이터셋 생성
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # tokenizer = BertTokenizerFast.from_pretrained(model_name)
+    tokenizer = globals()[token_name].from_pretrained(model_name)
 
     train_encodings = tokenizer(train_texts, truncation=True, padding=True, return_tensors='pt')
     val_encodings = tokenizer(val_texts, truncation=True, padding=True, return_tensors='pt')
@@ -282,7 +313,6 @@ for idx, row in exp_set.iterrows():
 
         # 로그 기록
         wandb.log({
-            "epoch": epoch + 1,
             "train_loss": train_loss,
             "train_accuracy": train_accuracy,
             "val_loss": val_loss,
@@ -295,8 +325,18 @@ for idx, row in exp_set.iterrows():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             no_improve_epoch = 0
-            # 모델 저장 로직 추가 가능
+            # 모델 저장 
             torch.save(model.state_dict(), f'./torch_models/{exp_name}.pth')
+            
+            # 결과 저장
+            tmp = exp_set.iloc[idx]
+            results = {
+                "train_loss": train_loss,
+                "train_accuracy": train_accuracy,
+                "val_loss": val_loss,
+                "val_accuracy": val_accuracy,
+                "val_f1_score": final_score["f1"]
+            }
         else:
             no_improve_epoch += 1
 
@@ -306,15 +346,6 @@ for idx, row in exp_set.iterrows():
             break
     
     # 실험 결과를 DataFrame으로 변환하여 저장
-    tmp = exp_set.iloc[idx]
-    results = {
-        "epoch": epoch + 1,
-        "train_loss": train_loss,
-        "train_accuracy": train_accuracy,
-        "val_loss": val_loss,
-        "val_accuracy": val_accuracy,
-        "val_f1_score": final_score["f1"]
-    }
     for col, value in results.items():
         tmp[col] = value
     tmp2 = pd.DataFrame([tmp])
@@ -323,9 +354,12 @@ for idx, row in exp_set.iterrows():
     # wandb 종료
     wandb.finish()
     
-    # 모델 예측
+    # 모델 예측    
     # 입력 데이터를 디바이스로 이동
     test_encodings = {key: val.to(device) for key, val in test_encodings.items()}
+
+    # 위에서 저장해둔 최적 모델 불러오기
+    # model.load_state_dict(torch.load(f'./torch_models/{exp_name}.pth'))
 
     # 모델을 평가 모드로 전환
     model.eval()
@@ -339,7 +373,7 @@ for idx, row in exp_set.iterrows():
     
     # 확률 파일 저장 - 추후 앙상블에 사용
     predictions_np = predictions.cpu().numpy()
-    predictions_df = pd.DataFrame(predictions_np, columns=['갈취 대화','기타 괴롭힘 대화','직장 내 괴롭힘 대화','협박 대화'])
+    predictions_df = pd.DataFrame(predictions_np, columns=['갈취 대화','기타 괴롭힘 대화','직장 내 괴롭힘 대화','협박 대화', '일반 대화'])
     # predictions_df['max_val'] = predictions_df.max(axis=1)
     predictions_df['label'] = predictions_df.iloc[:, :4].apply(lambda row: row.argmax(), axis=1)
     predictions_df['class'] = predictions_df.idxmax(axis=1)
@@ -351,6 +385,7 @@ for idx, row in exp_set.iterrows():
 
     # 텐서를 CPU로 이동시키고 NumPy 배열로 변환
     predicted_classes_np = predicted_classes.cpu().numpy()
+    len(predicted_classes_np)
 
     submission = pd.read_csv('./data/new_submission.csv')
     submission['class'] = predicted_classes_np
